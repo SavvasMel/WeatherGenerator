@@ -20,8 +20,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-
 from weathergen.common.config import Config
+
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.utils import healpix_verts_rots, r3tos2
 from weathergen.model.encoder import EncoderModule
@@ -43,6 +43,35 @@ from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
 
 logger = logging.getLogger(__name__)
+
+
+class LearnableGate(nn.Module):
+    """Wraps a learnable weight parameter in an nn.Module for FSDP2 compatibility."""
+
+    def __init__(self, mode: str, num_tokens: int, dim_embed: int):
+        super().__init__()
+        self.mode = mode
+        if mode == "scalar":
+            self.weight = nn.Parameter(torch.tensor(0.0))
+        elif mode == "spatial":
+            self.weight = nn.Parameter(0.1 * torch.randn(num_tokens))
+        elif mode == "full":
+            self.weight = nn.Parameter(0.1 * torch.randn(num_tokens, dim_embed))
+        else:
+            raise ValueError(f"Unknown lrc_weight_mode: {mode}")
+
+    def reset_parameters(self):
+        if self.mode == "scalar":
+            self.weight.data.fill_(0.0)
+        else:
+            self.weight.data.copy_(0.1 * torch.randn_like(self.weight))
+
+    def get_weight(self) -> torch.Tensor:
+        w = torch.sigmoid(self.weight)
+        if self.mode == "spatial":
+            w = w[:, None]
+        return w
+
 
 type StreamName = str
 
@@ -343,6 +372,7 @@ class Model(torch.nn.Module):
         self.register_token_idxs = list(range(cf.num_register_tokens))
         self.aux_token_idxs = list(range(cf.num_register_tokens + cf.num_class_tokens))
         self.num_aux_tokens = cf.num_register_tokens + cf.num_class_tokens
+        self.forecast_gate: LearnableGate | None = None
 
     def _create_latent_pred_head(
         self, global_cfg, name, loss_cfg, use_class_token, use_patch_token
@@ -380,6 +410,14 @@ class Model(torch.nn.Module):
         mode_cfg = cf.training_config
         if cf.fe_num_blocks > 0:
             self.forecast_engine = ForecastingEngine(cf, mode_cfg, self.num_healpix_cells)
+            if cf.get("lrc_enabled", False):
+                num_tokens = (
+                    self.num_healpix_cells + self.num_aux_tokens
+                ) * cf.ae_local_num_queries
+                lrc_weight_mode = cf.get("lrc_weight_mode", "spatial")
+                self.forecast_gate = LearnableGate(
+                    lrc_weight_mode, num_tokens, cf.ae_global_dim_embed
+                )
         else:
             self.forecast_engine = IdentityEngine()
 
@@ -582,10 +620,13 @@ class Model(torch.nn.Module):
 
     def reset_parameters(self):
         def _reset_params(module):
-            if isinstance(module, nn.Linear | nn.LayerNorm):
+            if isinstance(module, nn.Linear | nn.LayerNorm | LearnableGate):
                 module.reset_parameters()
             else:
                 pass
+
+        # forecast_gate.reset_parameters() is now handled by _reset_params via apply
+        # (LearnableGate has its own reset_parameters method)
 
         self.apply(_reset_params)
 
@@ -693,14 +734,31 @@ class Model(torch.nn.Module):
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
         # roll-out in latent space, iterate and generate output over requested output steps
+        lrc_enabled = self.cf.get("lrc_enabled", False)
+        lrc_combination = self.cf.get("lrc_combination", "additive")
         for step in batch.get_output_idxs():
             without_grad = p_fwd and self.training and step != max(batch.get_output_idxs())
-            if without_grad:
-                # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
-                tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
-                continue
+            if lrc_enabled:
+                w = self.forecast_gate.get_weight()
+                fe_out = self.forecast_engine(tokens, step, coords=model_params.rope_coords)
+                if lrc_combination == "convex":
+                    tokens = w * tokens + (1 - w) * fe_out
+                else:
+                    tokens = w * tokens + fe_out
+                if step == 1 and is_root():
+                    logger.info(
+                        f"residual_weight (sigmoid): mean={w.mean():.4e}, std={w.std():.4e}, "
+                        f"min={w.min():.4e}, max={w.max():.4e}, norm={w.norm():.4e}"
+                    )
+                if without_grad:
+                    # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
+                    continue
+            else:
+                tokens = self.forecast_engine(tokens, step, coords=model_params.rope_coords)
+                if without_grad:
+                    # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
+                    continue
 
-            tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
             # decoder predictions
             output = self.predict_decoders(model_params, step, tokens, batch, output)
             # latent predictions (raw and with SSL heads)
