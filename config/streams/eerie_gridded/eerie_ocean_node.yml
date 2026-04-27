@@ -12,7 +12,9 @@ EERIE_OCEAN_NODE:
   - avg_tos
   - avg_sos
   - avg_zos
-  location_weight : cosine_latitude
+  patch_size_deg: null
+  sampling_mode: 'global_sparse' # loads given number of random points globally for each time step. 
+  sample_points: 25000
   masking_rate : 0.6
   masking_rate_none : 0.05
   token_size : 32

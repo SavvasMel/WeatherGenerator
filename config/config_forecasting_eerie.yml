@@ -11,8 +11,8 @@ embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
-ae_local_dim_embed: 2048
-ae_local_num_blocks: 4
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
@@ -90,7 +90,7 @@ norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/eerie_native/"
+streams_directory: "./config/streams/eerie_gridded/"
 streams: ???
 
 # type of zarr_store
@@ -125,7 +125,7 @@ train_logging:
 # parameters for data loading
 data_loading :
 
-  num_workers: 12
+  num_workers: 8
   rng_seed: ???
   repeat_data_in_mini_epoch : False
 
@@ -140,7 +140,7 @@ training_config:
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 1950-01-01T00:00
+  start_date: 1971-01-01T00:00
   end_date: 2004-12-31T00:00
 
   time_window_step: 24:00:00
