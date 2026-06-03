@@ -10,6 +10,7 @@
 # nor does it submit to any jurisdiction.
 
 import logging
+import typing
 import warnings
 
 import astropy_healpix as hp

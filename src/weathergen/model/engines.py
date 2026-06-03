@@ -390,6 +390,7 @@ class QueryAggregationEngine(torch.nn.Module):
         super(QueryAggregationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
+        rope_mode = get_rope_mode(self.cf)
 
         self.ae_aggregation_blocks = torch.nn.ModuleList()
 
@@ -410,7 +411,7 @@ class QueryAggregationEngine(torch.nn.Module):
                         qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
-                        with_2d_rope=self.cf.get("rope_2D", False),
+                        rope_mode=rope_mode,
                     )
                 )
             else:
@@ -466,6 +467,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
         super(GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
+        rope_mode = get_rope_mode(self.cf)
 
         self.ae_global_blocks = torch.nn.ModuleList()
 
@@ -486,7 +488,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
-                        with_2d_rope=self.cf.get("rope_2D", False),
+                        rope_mode=rope_mode,
                     )
                 )
             else:
@@ -503,7 +505,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
-                        with_2d_rope=self.cf.get("rope_2D", False),
+                        rope_mode=rope_mode,
                     )
                 )
             # MLP block
@@ -556,7 +558,11 @@ class ForecastingEngine(torch.nn.Module):
         self.num_healpix_cells = num_healpix_cells
         self.fe_blocks = torch.nn.ModuleList()
         self.rope_2D = cf.get("rope_2D", False)
-        self.healpix_level = cf.get("fe_healpix_level") if cf.get("fe_healpix_level") is not None else cf.get("healpix_level")
+        self.healpix_level = (
+            cf.get("fe_healpix_level")
+            if cf.get("fe_healpix_level") is not None
+            else cf.get("healpix_level")
+        )
         self.dtype = get_dtype(cf.attention_dtype)
 
         if self.rope_2D:
@@ -586,7 +592,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
-                            with_2d_rope=self.cf.get("rope_2D", False),
+                            rope_mode=self.rope_mode,
                         )
                     )
                 else:
@@ -604,7 +610,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
-                            with_2d_rope=self.cf.get("rope_2D", False),
+                            rope_mode=self.rope_mode,
                         )
                     )
                 # Add MLP block
