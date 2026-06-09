@@ -15,9 +15,10 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-
 from weathergen.common.config import Config
 from weathergen.common.io import IOReaderData
+from weathergen.readers_extra.registry import get_extra_reader
+
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_base import (
@@ -32,7 +33,6 @@ from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import (
     get_tokens_lens,
 )
-from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
 
@@ -371,9 +371,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
     def get_targets_coords_size(self):
         # TODO: avoid hard coding magic values
-        # +6 at the end for stream_id and time encoding
+        # +8 at the end for stream_id and time encoding (7 now for seasonal + intraday)
         return [
-            (ds.readers[0].get_geoinfo_size() + (5 * (3 * 5)) + 3 * 8) + 6
+            ds.readers[0].get_geoinfo_size() + (5 * (3 * 5)) + 3 * 8 + 8
             for ds in self.streams_datasets.values()
         ]
 

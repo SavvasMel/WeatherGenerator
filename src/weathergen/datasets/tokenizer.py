@@ -33,8 +33,7 @@ class Tokenizer:
 
         self.num_healpix_cells_source = 12 * 4**self.hl_source
         self.num_healpix_cells_target = 12 * 4**self.hl_target
-
-        self.size_time_embedding = 6
+        self.size_time_embedding = 8
 
         verts00, verts00_rots = healpix_verts_rots(self.hl_source, 0.0, 0.0)
         verts10, verts10_rots = healpix_verts_rots(self.hl_source, 1.0, 0.0)
