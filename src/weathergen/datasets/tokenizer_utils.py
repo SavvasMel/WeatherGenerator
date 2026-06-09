@@ -3,8 +3,8 @@ import pandas as pd
 import torch
 from astropy_healpix.healpy import ang2pix
 from torch import Tensor
-
 from weathergen.common.io import IOReaderData
+
 from weathergen.datasets.utils import (
     locs_to_cell_coords_ctrs,
     locs_to_ctr_coords,
@@ -28,7 +28,7 @@ def encode_times_source(times, time_win) -> torch.tensor:
     """Encode times in the format used for source
 
     Return:
-        len(times) x 5
+        len(times) x 8 (5 for intraday + 3 for seasonal)
     """
     # assemble tensor as fed to the network, combining geoinfo and data
     fp32 = torch.float32
@@ -46,16 +46,28 @@ def encode_times_source(times, time_win) -> torch.tensor:
             torch.tensor(minutes, dtype=fp32).unsqueeze(1),
             torch.tensor(delta_seconds, dtype=fp32).unsqueeze(1),
             torch.tensor(delta_seconds, dtype=fp32).unsqueeze(1),
+            # Add seasonal components (3 more)
+            torch.tensor(dayofyear, dtype=fp32).unsqueeze(1),
+            torch.tensor(dayofyear, dtype=fp32).unsqueeze(1),
+            torch.tensor(dayofyear, dtype=fp32).unsqueeze(1),
         ),
         1,
     )
-
-    # normalize
+    # normalize intraday components
     time_tensor[..., 0] /= 2100.0
     time_tensor[..., 1] = time_tensor[..., 1] / 365.0
     time_tensor[..., 2] = time_tensor[..., 2] / 1440.0
     time_tensor[..., 3] = np.sin(time_tensor[..., 3] / (12.0 * 3600.0) * 2.0 * np.pi)
     time_tensor[..., 4] = np.cos(time_tensor[..., 4] / (12.0 * 3600.0) * 2.0 * np.pi)
+
+    # normalize and encode seasonal components
+    time_tensor[..., 5] = time_tensor[..., 5] / 365.0
+    time_tensor[..., 6] = time_tensor[..., 6] / 365.0
+    time_tensor[..., 7] = time_tensor[..., 7] / 365.0
+    time_tensor[..., 5] = np.sin(2.0 * np.pi * time_tensor[..., 5])
+    time_tensor[..., 6] = np.cos(2.0 * np.pi * time_tensor[..., 6])
+    # Use constant 1.0 for third seasonal component (or could use another transformation)
+    time_tensor[..., 7] = 1.0
 
     return time_tensor
 
@@ -64,14 +76,18 @@ def encode_times_target(times, time_win) -> torch.tensor:
     """Encode times in the format used for target (relative time in window)
 
     Return:
-        len(times) x 5
+        len(times) x 7 (5 for intraday + 2 for seasonal)
     """
     dt = pd.to_datetime(times)
     dt_win = pd.to_datetime(time_win)
-    # for target only provide local time
+    # for target provide local time and seasonal information
     dt_delta = torch.tensor(np.atleast_1d((dt - dt_win[0]).seconds), dtype=torch.float32).unsqueeze(
         1
     )
+
+    # Get seasonal information
+    dayofyear = np.atleast_1d(dt.dayofyear)
+
     time_tensor = torch.cat(
         (
             dt_delta,
@@ -79,6 +95,9 @@ def encode_times_target(times, time_win) -> torch.tensor:
             dt_delta,
             dt_delta,
             dt_delta,
+            # Add seasonal components
+            torch.tensor(dayofyear, dtype=torch.float32).unsqueeze(1),
+            torch.tensor(dayofyear, dtype=torch.float32).unsqueeze(1),
         ),
         1,
     )
@@ -89,6 +108,12 @@ def encode_times_target(times, time_win) -> torch.tensor:
     time_tensor[..., 2] = np.sin(time_tensor[..., 2] / (12.0 * 3600.0) * 2.0 * np.pi)
     time_tensor[..., 3] = np.cos(time_tensor[..., 3] / (12.0 * 3600.0) * 2.0 * np.pi)
     time_tensor[..., 4] = np.sin(time_tensor[..., 4] / (12.0 * 3600.0) * 2.0 * np.pi)
+
+    # Normalize and encode seasonal components
+    time_tensor[..., 5] = time_tensor[..., 5] / 365.0
+    time_tensor[..., 6] = time_tensor[..., 6] / 365.0
+    time_tensor[..., 5] = np.sin(2.0 * np.pi * time_tensor[..., 5])
+    time_tensor[..., 6] = np.cos(2.0 * np.pi * time_tensor[..., 6])
 
     # We add + 0.5 as for datasets with regular time steps we otherwise very often get 0 as the
     # first time and to prevent too many zeros in the input
