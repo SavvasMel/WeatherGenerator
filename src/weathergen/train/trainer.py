@@ -455,6 +455,16 @@ class Trainer(TrainerBase):
 
                 batch.to_device(self.device)
 
+                breakpoint()
+
+                if self.model.conditioning_embedder is not None:
+                    conditioning = self.model.conditioning_embedder.embed(batch, step=0)
+                    print("[DEBUG] Conditioning embedder:")
+                    print(f"  dim_embed: {conditioning.dim_embed}")
+                    print(f"  streams: {list(conditioning.embeddings.keys())}")
+                    for name, emb in conditioning.embeddings.items():
+                        print(f"  {name}: shape={emb.shape}, dtype={emb.dtype}")
+
                 with torch.autocast(
                     device_type=f"cuda:{cf.local_rank}",
                     dtype=self.mixed_precision_dtype,

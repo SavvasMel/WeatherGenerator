@@ -24,6 +24,7 @@ from torch.utils.checkpoint import checkpoint
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.utils import healpix_verts_rots, r3tos2
+from weathergen.model.conditioning import ConditioningEmbedder
 from weathergen.model.encoder import EncoderModule
 from weathergen.model.engines import (
     BilinearDecoder,
@@ -325,6 +326,7 @@ class Model(torch.nn.Module):
         self.embed_target_coords = None
         self.encoder: EncoderModule | None = None
         self.forecast_engine: ForecastingEngine | IdentityEngine | None = None
+        self.conditioning_embedder: ConditioningEmbedder | None = None
         self.pred_heads = None
         self.q_cells: torch.Tensor | None = None
         self.streams: dict[str, typing.Any] = {
@@ -376,6 +378,7 @@ class Model(torch.nn.Module):
         """Create each individual module of the model"""
         cf = self.cf
 
+        breakpoint()
         self.encoder = EncoderModule(
             cf, self.sources_size, self.targets_num_channels, self.targets_coords_size
         )
@@ -385,6 +388,8 @@ class Model(torch.nn.Module):
             self.forecast_engine = ForecastingEngine(cf, mode_cfg, self.num_healpix_cells)
         else:
             self.forecast_engine = IdentityEngine()
+
+        self.conditioning_embedder = ConditioningEmbedder(cf)
 
         # embed coordinates yielding one query token for each target token
         dropout_rate = cf.embed_dropout_rate
