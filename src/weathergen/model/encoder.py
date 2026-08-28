@@ -258,7 +258,7 @@ class EncoderModule(torch.nn.Module):
         tokens_global = checkpoint(
             self.ae_global_engine,
             tokens_global,
-            coords=model_params.rope_coords,
+            coords=self.rope_coords if self.rope_2D else None,
             use_reentrant=False,
         )
 
@@ -402,10 +402,8 @@ class EncoderModule(torch.nn.Module):
         Processes embedded tokens locally and prepares them for the global assimilation
 
         Args:
-            model_params : Query and embedding parameters
             tokens : Input tokens to be processed by local assimilation
-            cell_lens : Used to identify range of tokens to use from generated tokens in cell
-                embedding
+            batch : Model batch containing tokens_lens and other data
         Returns:
             Tokens for global assimilation
         """
@@ -438,7 +436,7 @@ class EncoderModule(torch.nn.Module):
             tokens_global_unmasked,
             tokens_global_register_class,
             batch.tokens_lens,
-            rope_cell_coords=model_params.rope_cell_coords,
+            rope_cell_coords=self.rope_cell_coords if self.rope_2D else None,
         )
 
         # final processing
@@ -472,7 +470,6 @@ class EncoderModule(torch.nn.Module):
         q_c_shape = self.q_cells.shape
         tokens_global = (
             tokens_global.reshape([rs, num_tokens_tot, q_c_shape[-2], q_c_shape[-1]])
-            #  removing this line because else they get added twice? + model_params.pe_global
         ).flatten(1, 2)
 
         return tokens_global, posteriors
