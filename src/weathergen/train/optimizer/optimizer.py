@@ -56,6 +56,9 @@ class OptimizerBase(torch.optim.Optimizer):
     them. Subclasses build the wrapped optimizers and pass them to __init__.
     """
 
+    # whether a lr scheduler may cycle momentum/beta1 alongside the lr (OneCycleLR)
+    cycle_momentum: bool = False
+
     def __init__(self, optimizers: list[torch.optim.Optimizer], names: list[str], lr: float):
         self.optimizers = optimizers
         self.names = names
@@ -125,6 +128,8 @@ class AdamW(OptimizerBase):
     Single torch.optim.AdamW optimizer over all of the model's parameters.
     """
 
+    cycle_momentum = True
+
     def __init__(self, model: torch.nn.Module, optimizer_cfg, lr_cfg, kappa: float):
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -135,6 +140,8 @@ class AdamW(OptimizerBase):
         )
 
         super().__init__([optimizer], ["adamw"], lr_cfg.lr_start)
+        # OneCycleLR reads beta1 off defaults when cycling momentum
+        self.defaults["betas"] = optimizer.defaults["betas"]
 
 
 class Muon(OptimizerBase):
@@ -152,6 +159,9 @@ class Muon(OptimizerBase):
     exactly what makes the RMS of muon's update match adamw's at the same nominal lr
     (`Muon is Scalable for LLM Training`, https://arxiv.org/abs/2502.16982).
     """
+
+    # muon's groups carry "momentum" and adamw's carry "betas": OneCycleLR cycles only one key
+    cycle_momentum = False
 
     def __init__(self, model: torch.nn.Module, optimizer_cfg, lr_cfg, kappa: float):
         muon_cfg = optimizer_cfg.muon
