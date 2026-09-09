@@ -19,6 +19,7 @@ import weathergen.common.io as io
 from weathergen.common.io import TimeRange, zarrio_writer
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.engines import LatentState
+from weathergen.utils.utils import is_stream_fe_only
 
 _logger = logging.getLogger(__name__)
 
@@ -55,6 +56,11 @@ def write_output(
     forecast_offset = timestep_idxs[0]
     targets_lens = []
 
+    data_streams = {}
+    for stream_name in cf.streams.keys():
+        if not is_stream_fe_only(cf.streams[stream_name]):
+            data_streams[stream_name] = {}
+
     # TODO Maybe stopping at forecast_steps explained #1657
     for t_idx in timestep_idxs:
         preds_all += [[]]
@@ -62,7 +68,7 @@ def write_output(
         targets_coords_all += [[]]
         targets_times_all += [[]]
         targets_lens += [[]]
-        for sname in cf.streams.keys():
+        for sname in data_streams.keys():
             # handle spoof data: do not write since it might corrupt validation (spoofing invisible
             # there)
             if target_aux_out.physical[t_idx][sname]["is_spoof"][0]:
@@ -146,10 +152,15 @@ def write_output(
     }
     _logger.debug(f"Using output streams: {output_streams} from streams: {stream_names}")
 
-    target_channels: list[list[str]] = [list(stream.val_target_channels) for stream in stream_infos]
-    source_channels: list[list[str]] = [list(stream.val_source_channels) for stream in stream_infos]
+    target_channels: list[list[str]] = [
+        list(stream.val_target_channels) for stream in stream_infos if not is_stream_fe_only(stream)
+    ]
+    source_channels: list[list[str]] = [
+        list(stream.val_source_channels) for stream in stream_infos if not is_stream_fe_only(stream)
+    ]
 
-    geoinfo_channels = [[] for _ in stream_infos]  # TODO obtain channels
+    # TODO obtain channels
+    geoinfo_channels = [[] for s in stream_infos if not is_stream_fe_only(s)]
 
     # calculate global sample indices for this batch by offsetting by sample_start
     sample_start = batch_idx * batch_size
