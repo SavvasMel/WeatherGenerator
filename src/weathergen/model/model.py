@@ -335,6 +335,8 @@ class Model(torch.nn.Module):
         self.embed_target_coords = None
         self.encoder: EncoderModule | None = None
         self.forecast_engine: ForecastingEngine | IdentityEngine | None = None
+        self.forcing_module: ForcingInjection | None = None
+        self.compute_cos_sim_to_prev = False
         self.pred_heads = None
         self.q_cells: torch.Tensor | None = None
         self.streams: dict[str, typing.Any] = cf.streams
@@ -415,8 +417,7 @@ class Model(torch.nn.Module):
         ]
         self.data_streams = [cfg for cfg in cf.streams.values() if not is_stream_fe_only(cfg)]
 
-        # per-step spatial forcing injected into the FE (SST etc.); None if no such stream
-        self.forcing_module = None
+        # per-step spatial forcing injected into the FE (SST etc.); stays None if no such stream
         for stream_cfg in cf.streams.values():
             if stream_cfg.get("type") != "forcing":
                 continue
@@ -754,40 +755,38 @@ class Model(torch.nn.Module):
         # roll-out in latent space, iterate and generate output over requested output steps
         # the first FE step leaves the encoder regime, so it is excluded from the cosine band
         fe_steps = 0
+        # conditions/forcing are filled by the sampler on the source samples, not on the batch
+        source_samples = batch.get_source_samples()
+        conditions = source_samples.conditions
+        forcing = source_samples.forcing
         for step in batch.get_output_idxs():
             without_grad = p_fwd and self.training and step != max(batch.get_output_idxs())
 
             # FE conditioning for this step: the condition stream's encoded values, indexed
             # by absolute forecast step (conditions[] is built for every step from 0).
-            condition = batch.conditions[step] if step < len(batch.conditions) else None
+            condition = conditions[step] if step < len(conditions) else None
             # inject the per-step spatial forcing (e.g. SST) into the latent state /
             # conditioning before advancing; no-op when no forcing module or no field.
             if self.forcing_module is not None:
-                forcing_list = getattr(batch, "forcing", None)
-                forcing_field = (
-                    forcing_list[step]
-                    if forcing_list is not None and step < len(forcing_list)
-                    else None
-                )
                 tokens, condition = self.forcing_module(
                     tokens,
                     condition,
-                    forcing_field,
+                    forcing[step] if step < len(forcing) else None,
                     self.num_aux_tokens,
                     # only used by learned_pool (raw field pooled on GPU); unused otherwise
-                    cell_idx=getattr(batch, "forcing_cell_idx", None),
+                    cell_idx=source_samples.forcing_cell_idx,
                     num_cells=self.num_healpix_cells,
                 )
 
             if without_grad:
                 # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
-                tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
+                tokens = self.forecast_engine(tokens, condition, model_params.rope_coords)
                 fe_steps += 1
                 continue
 
             capture_cos = self.compute_cos_sim_to_prev and fe_steps > 0
             prev_tokens = tokens if capture_cos else None
-            tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
+            tokens = self.forecast_engine(tokens, condition, model_params.rope_coords)
             fe_steps += 1
 
             if capture_cos:
