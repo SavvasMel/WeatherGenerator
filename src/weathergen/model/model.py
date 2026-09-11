@@ -37,12 +37,13 @@ from weathergen.model.engines import (
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
 )
+from weathergen.model.forcing import ForcingInjection
 from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.norms import AdaLayerNorm
 from weathergen.model.utils import get_num_parameters
 from weathergen.train.loss_modules.utils import compute_cos_sim_to_prev
 from weathergen.utils.distributed import is_root
-from weathergen.utils.utils import get_dtype, is_stream_forcing
+from weathergen.utils.utils import get_dtype, is_stream_fe_only, is_stream_forcing
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +304,14 @@ class Model(torch.nn.Module):
         coordinates to its physical space.
     """
 
-    def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
+    def __init__(
+        self,
+        cf: Config,
+        sources_size,
+        targets_num_channels,
+        targets_coords_size,
+        condition_num_channels: int = 0,
+    ):
         """
         Args:
             cf : Configuration with model parameters
@@ -330,6 +338,10 @@ class Model(torch.nn.Module):
         self.pred_heads = None
         self.q_cells: torch.Tensor | None = None
         self.streams: dict[str, typing.Any] = cf.streams
+        self.data_stream_names: list | None = None
+        self.data_streams: list | None = None
+        # width of the FE conditioning vector contributed by condition streams
+        self.forecast_aux_infos = condition_num_channels
         self.target_token_engines = None
 
         assert cf.get("forecast", {}).get("att_dense_rate", 1.0) == 1.0, (
@@ -381,7 +393,12 @@ class Model(torch.nn.Module):
 
         mode_cfg = cf.training_config
         if cf.fe_num_blocks > 0:
-            self.forecast_engine = ForecastingEngine(cf, mode_cfg, self.num_healpix_cells)
+            self.forecast_engine = ForecastingEngine(
+                cf,
+                mode_cfg,
+                self.num_healpix_cells,
+                self.forecast_aux_infos if self.forecast_aux_infos > 0 else None,
+            )
         else:
             self.forecast_engine = IdentityEngine()
 
@@ -391,7 +408,37 @@ class Model(torch.nn.Module):
         self.target_token_engines = torch.nn.ModuleDict()
         self.pred_heads = torch.nn.ModuleDict()
 
-        # determine stream names once so downstream components use consistent keys
+        # determine stream names once so downstream components use consistent keys.
+        # condition/forcing streams feed the FE directly, not the assimilation/decoder path.
+        self.data_stream_names = [
+            name for name, cfg in cf.streams.items() if not is_stream_fe_only(cfg)
+        ]
+        self.data_streams = [cfg for cfg in cf.streams.values() if not is_stream_fe_only(cfg)]
+
+        # per-step spatial forcing injected into the FE (SST etc.); None if no such stream
+        self.forcing_module = None
+        for stream_cfg in cf.streams.values():
+            if stream_cfg.get("type") != "forcing":
+                continue
+            inj = stream_cfg.get("injection", {})
+            mode = inj.get("mode", "none")
+            if mode == "none":
+                continue
+            source_channels = stream_cfg.get("train_source_channels") or stream_cfg.get(
+                "val_source_channels", []
+            )
+            # dim_embed must equal the FE token dim so additive/cross_attn line up; the
+            # global/adaln_local modes then project this down to the conditioning dim.
+            self.forcing_module = ForcingInjection(
+                num_vars=len(source_channels),
+                dim_embed=cf.ae_global_dim_embed,
+                mode=mode,
+                dim_aux=self.forecast_aux_infos,
+                num_heads=cf.fe_num_heads,
+                learned_pool=inj.get("learned_pool", False),
+            )
+            break  # one forcing stream supported for now
+
         loss_terms = [
             v.type for _, v in cf.training_config.losses.items() if v.get("enabled", True)
         ]
@@ -404,7 +451,8 @@ class Model(torch.nn.Module):
         self.compute_cos_sim_to_prev = "LossLatent" in loss_terms
 
         if "LossPhysical" in loss_terms:
-            for i_stream, (stream_name, si) in enumerate(self.streams.items()):
+            for i_stream, si in enumerate(self.data_streams):
+                stream_name = self.data_stream_names[i_stream]
                 # skip decoder if channels are empty
                 if is_stream_forcing(si):
                     continue
@@ -495,7 +543,8 @@ class Model(torch.nn.Module):
                     )
 
             # iterate again to setup shared spatial pred heads if specified in config
-            for i_stream, (stream_name, si) in enumerate(self.streams.items()):
+            for i_stream, si in enumerate(self.data_streams):
+                stream_name = self.data_stream_names[i_stream]
                 # skip decoder if channels are empty
                 if is_stream_forcing(si):
                     continue
@@ -594,12 +643,17 @@ class Model(torch.nn.Module):
 
         self.apply(_reset_params)
 
+        # forcing_module owns Parameters/buffers (gate, embed.mean/.stdev) that aren't
+        # nn.Linear/nn.LayerNorm, so the sweep above misses them -- reset explicitly.
+        if self.forcing_module is not None:
+            self.forcing_module.reset_parameters()
+
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
 
         num_params_embed = [
             get_num_parameters(self.encoder.embed_engine.embeds[name])
-            for name in self.streams.keys()
+            for name in self.data_stream_names
         ]
         num_params_total = get_num_parameters(self)
         num_params_ae_local = get_num_parameters(self.encoder.ae_local_engine.ae_local_blocks)
@@ -622,17 +676,17 @@ class Model(torch.nn.Module):
         mdict = self.embed_target_coords
         num_params_embed_tcs = [
             get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
+            for name in self.data_stream_names
         ]
         mdict = self.target_token_engines
         num_params_tte = [
             get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
+            for name in self.data_stream_names
         ]
         mdict = self.pred_heads
         num_params_preds = [
             get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
+            for name in self.data_stream_names
         ]
 
         print("-----------------")
@@ -641,7 +695,7 @@ class Model(torch.nn.Module):
         print("  Embedding networks:")
         [
             print("    {} : {:,}".format(si["name"], np))
-            for si, np in zip(self.streams.values(), num_params_embed, strict=False)
+            for si, np in zip(self.data_streams, num_params_embed, strict=False)
         ]
         print(f" Local assimilation engine: {num_params_ae_local:,}")
         print(f" Local-global adapter: {num_params_ae_adapter:,}")
@@ -652,7 +706,7 @@ class Model(torch.nn.Module):
         print(f" Forecast engine: {num_params_fe:,}")
         print(" coordinate embedding, prediction networks and prediction heads:")
         zps = zip(
-            self.streams.keys(),
+            self.data_stream_names,
             num_params_embed_tcs,
             num_params_tte,
             num_params_preds,
@@ -702,6 +756,29 @@ class Model(torch.nn.Module):
         fe_steps = 0
         for step in batch.get_output_idxs():
             without_grad = p_fwd and self.training and step != max(batch.get_output_idxs())
+
+            # FE conditioning for this step: the condition stream's encoded values, indexed
+            # by absolute forecast step (conditions[] is built for every step from 0).
+            condition = batch.conditions[step] if step < len(batch.conditions) else None
+            # inject the per-step spatial forcing (e.g. SST) into the latent state /
+            # conditioning before advancing; no-op when no forcing module or no field.
+            if self.forcing_module is not None:
+                forcing_list = getattr(batch, "forcing", None)
+                forcing_field = (
+                    forcing_list[step]
+                    if forcing_list is not None and step < len(forcing_list)
+                    else None
+                )
+                tokens, condition = self.forcing_module(
+                    tokens,
+                    condition,
+                    forcing_field,
+                    self.num_aux_tokens,
+                    # only used by learned_pool (raw field pooled on GPU); unused otherwise
+                    cell_idx=getattr(batch, "forcing_cell_idx", None),
+                    num_cells=self.num_healpix_cells,
+                )
+
             if without_grad:
                 # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
                 tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
@@ -792,7 +869,7 @@ class Model(torch.nn.Module):
         tokens_nbors_lens[0] = 0
 
         # pair with tokens from assimilation engine to obtain target tokens
-        for stream_name in self.streams.keys():
+        for stream_name in self.data_stream_names:
             # extract target coords for current stream and fstep and convert to one tensor
             t_coords = [
                 batch.samples[i_b].streams_data[stream_name].target_coords[step]
