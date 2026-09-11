@@ -1,0 +1,46 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# SST forcing: prescribed lower boundary, not predicted. Re-read at every forecast
+# step's valid time and injected into the FE. SST is NaN over land.
+SST :
+  type : forcing
+  #filenames : ['/e/data1/slmet/ml_training/ERA5-1deg-6h-mean-forcing-1978-2024.zarr']
+  filenames : ['/e/data1/slmet/ml_training/aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v2-s2s-predictors.zarr']
+  stream_id : 10
+  entry_point : "forecast_engine"
+  frequency : 06:00:00
+  # empty target channels -> is_stream_forcing -> no decoder
+  #train_source_channels : ['sea_surface_temperature', 'sea_ice_cover', 'land_sea_mask']
+  #val_source_channels   : ['sea_surface_temperature', 'sea_ice_cover', 'land_sea_mask']
+  train_source_channels : ['sst']
+  val_source_channels   : ['sst']
+  train_target_channels : []
+  val_target_channels   : []
+  geoinfo_channels : []
+  loss_weight : 0.
+  location_weight : cosine_latitude
+  token_size : 8
+  tokenize_spacetime : True
+  injection :
+    #   none        : disabled
+    #   additive    : forcing embedding added to FE latent tokens
+    #   cross_attn  : latent tokens cross-attend to forcing tokens
+    #   global      : pooled to a global vector -> AdaLN condition path
+    #   adaln_local : per-cell AdaLN conditioning
+    mode : adaln_local
+    # True: raw grid pooled by a learned segment-softmax (LearnedForcingPool).
+    # False: fixed scatter-mean in the dataloader, no gradient.
+    learned_pool : True
+  embed :
+    net : transformer
+    num_tokens : 1
+    num_heads : 8
+    dim_embed : 512
+    num_blocks : 2

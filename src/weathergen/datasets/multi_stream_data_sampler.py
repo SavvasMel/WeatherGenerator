@@ -32,6 +32,7 @@ from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import (
     get_tokens_lens,
 )
+from weathergen.readers_extra.data_reader_condition import DataReaderCondition
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
@@ -145,6 +146,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.samples_per_mini_epoch = mode_cfg.samples_per_mini_epoch
         self.check_samples(self._get_fsm())
         self.streams_datasets = self._init_stream_datasets(cf)
+        self.condition_datasets = self._init_condition_streams(cf)
+        self.forcing_datasets = self._init_forcing_streams(cf)
 
         # RNG seed setup
         rs = cf.data_loading.rng_seed
@@ -217,10 +220,79 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return np.arange(self.max_input_steps, perms_len)
 
+    def _init_condition_streams(self, cf) -> dict[StreamName, _Stream]:
+        """Instantiate and register a condition stream (no backing files required)."""
+        condition_datasets: dict[StreamName, _Stream] = {}
+        for stream_name, stream_info in cf.streams.items():
+            if stream_info["type"] != "condition":
+                continue
+            condition_datasets[stream_name] = _Stream(stream_info, [])
+            if is_root():
+                logger.info(f"Opening condition dataset from stream config {stream_info['name']}.")
+            ds = DataReaderCondition(
+                tw_handler=self.time_window_handler, stream_info=stream_info, filename=None
+            )
+            condition_datasets[stream_name].readers += [ds]
+        return condition_datasets
+
+    def _init_forcing_streams(self, cf) -> dict[StreamName, _Stream]:
+        """
+        Instantiate per-step forcing streams (type: forcing, e.g. SST).
+
+        Read at every forecast step's valid time and injected into the forecasting engine
+        (they do not go through the assimilation/source path). The forcing grid is fixed, so
+        the scatter index onto the HEALPix cells is precomputed once per reader.
+        """
+        from weathergen.model.forcing import build_forcing_cell_index
+
+        forcing_datasets: dict[StreamName, _Stream] = {}
+        for stream_name, stream_info in cf.streams.items():
+            if stream_info["type"] != "forcing":
+                continue
+            stream = _Stream(stream_info, [])
+            stream_info["data_paths"] = cf.get("data_paths", [])
+            dataset = get_extra_reader(stream_info["type"])
+
+            for fname in stream_info["filenames"]:
+                fname = pathlib.Path(fname)
+                if fname.exists():
+                    filename = fname
+                else:
+                    filenames = [pathlib.Path(path) / fname for path in cf.data_paths]
+                    if not any(f.exists() for f in filenames):
+                        raise FileNotFoundError(
+                            f"Did not find input data for forcing stream '{stream_name}': "
+                            f"{filenames}."
+                        )
+                    filename = filenames[0]
+
+                ds = dataset(
+                    tw_handler=self.time_window_handler,
+                    stream_info=stream_info,
+                    stage=self._stage,
+                    filename=filename,
+                )
+                # precompute the fixed forcing-grid -> HEALPix-cell scatter index
+                ds.forcing_cell_idx = build_forcing_cell_index(
+                    ds.latitudes, ds.longitudes, self.healpix_level
+                )
+                stream.readers += [ds]
+                if is_root():
+                    logger.info(
+                        f"Opening forcing dataset '{stream_name}' from {filename} "
+                        f"(scatter onto {self.num_healpix_cells} cells)."
+                    )
+            forcing_datasets[stream_name] = stream
+        return forcing_datasets
+
     def _init_stream_datasets(self, cf) -> dict[StreamName, _Stream]:
         """Load dataset readers for all streams from config."""
         streams_datasets: dict[StreamName, _Stream] = {}
         for stream_name, stream_info in cf.streams.items():
+            # condition and per-step forcing streams feed the forecasting engine directly,
+            # not the assimilation/source path; they are initialised separately.
+            if stream_info["type"] in ("condition", "forcing"):
+                continue
             stream_info["data_paths"] = cf.get("data_paths", [])
             # list of sources for current stream
             streams_datasets[stream_name] = _Stream(stream_info, [])
@@ -359,6 +431,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             + self.tokenizer.get_size_time_embedding()
             for ds in self.streams_datasets.values()
         ]
+
+    def get_condition_num_channels(self):
+        return sum([ds.readers[0].num_channels for ds in self.condition_datasets.values()])
 
     def get_sources_num_channels(self):
         return [ds.readers[0].get_source_num_channels() for ds in self.streams_datasets.values()]
@@ -649,6 +724,79 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return batch
 
+    def _build_condition_data(
+        self,
+        batch: ModelBatch,
+        condition_ds: AnyDataReader,
+        base_idx: TIndex,
+        num_output_steps: int,
+    ) -> None:
+        """
+        Collect encoded condition values for each forecast step into the batch.
+
+        Parameters
+        ----------
+        condition_ds :
+            The condition reader (DataReaderCondition instance).
+        base_idx :
+            Base time index for this sample.
+        num_output_steps :
+            Total number of output/forecast steps.
+        """
+
+        for i in range(num_output_steps):
+            condition_data = condition_ds.get_condition(
+                base_idx + (self.time_step * i) // self.step_timedelta
+            )
+            batch.get_source_samples().conditions[i] += condition_data
+
+    def _build_forcing_data(
+        self,
+        batch: ModelBatch,
+        forcing_ds: AnyDataReader,
+        base_idx: TIndex,
+        num_output_steps: int,
+    ) -> None:
+        """
+        Collect the per-step forcing field (e.g. SST) for each forecast step.
+
+        Mirrors `_build_condition_data`, but spatial: the reader is read at each step's
+        valid time (raw, full grid, normalised by the reader stats).
+
+        Two modes, from `injection.learned_pool` in the forcing stream's config:
+          * False (default): scatter-averaged onto the HEALPix cells here (CPU, no gradient),
+            stored per step as (num_cells, 2*num_vars) = [cell_values | cell_valid].
+          * True: the raw (num_points, num_vars) grid is stored and pooling happens on the
+            model side (LearnedForcingPool), so the pooling itself can be trained.
+        """
+        from weathergen.model.forcing import scatter_to_cells
+
+        learned_pool = forcing_ds.stream_info.get("injection", {}).get("learned_pool", False)
+        cell_idx = forcing_ds.forcing_cell_idx
+        num_grid_pts = len(cell_idx)
+        source_samples = batch.get_source_samples()
+        if learned_pool:
+            source_samples.forcing_cell_idx = cell_idx
+
+        for i in range(num_output_steps):
+            idx = base_idx + (self.time_step * i) // self.step_timedelta
+            rdata = forcing_ds.get_source(idx)
+            # full-grid values in fixed grid order; if the reader stacked multiple input
+            # steps, keep only the most recent grid
+            values = forcing_ds.normalize_source_channels(rdata.data)
+            values = np.asarray(values)[-num_grid_pts:]
+
+            if learned_pool:
+                source_samples.forcing[i] = values
+            else:
+                values_t = torch.as_tensor(values, dtype=torch.float32)
+                cell_values, cell_valid = scatter_to_cells(
+                    values_t.unsqueeze(0), cell_idx, self.num_healpix_cells
+                )
+                source_samples.forcing[i] = torch.cat(
+                    [cell_values[0], cell_valid[0]], dim=-1
+                ).numpy()
+
     def _get_batch(self, idx: int, num_forecast_steps: int):
         """
         Assemble a batch using the sample corresponding to idx
@@ -750,6 +898,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     s_idx for s_idx, tid in enumerate(source_to_target) if tid == tidx
                 ]
                 batch.add_target_stream(tidx, student_indices, stream_name, sdata, target_metadata)
+
+        # for condition streams
+        for _, condition_data in self.condition_datasets.items():
+            self._build_condition_data(batch, condition_data.readers[0], idx, num_output_steps)
+
+        # for per-step forcing streams (e.g. SST)
+        for _, forcing_data in self.forcing_datasets.items():
+            self._build_forcing_data(batch, forcing_data.readers[0], idx, num_output_steps)
 
         source_in_steps = input_steps.max().item()
         target_in_steps = np.array([tc.get("num_steps_input", 1) for _, tc in target_cfgs.items()])

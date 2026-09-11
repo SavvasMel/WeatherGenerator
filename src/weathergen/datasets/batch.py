@@ -176,6 +176,15 @@ class BatchSamples:
         self.output_steps = output_steps
         self.output_idxs = output_idxs
         self.device = None
+        # per-forecast-step encoded condition values, filled by
+        # MultiStreamDataSampler._build_condition_data; a tensor after to_device
+        self.conditions = [[] for _ in range(output_steps)]
+        # per-forecast-step spatial forcing (e.g. SST). Either a (num_cells, 2*num_vars)
+        # array of [cell_values | cell_valid] (fixed scatter-mean, the default), or the raw
+        # (num_points, num_vars) grid when learned_pool is on. A tensor after to_device.
+        self.forcing = [[] for _ in range(output_steps)]
+        # fixed point -> HEALPix-cell index, only set when learned_pool is enabled
+        self.forcing_cell_idx: torch.Tensor | None = None
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -187,6 +196,18 @@ class BatchSamples:
         self.tokens_lens = (
             self.tokens_lens.to(device, non_blocking=True) if self.tokens_lens is not None else None
         )
+
+        self.conditions = [
+            torch.tensor(cond, dtype=torch.float32, device=device) if len(cond) > 0 else cond
+            for cond in self.conditions
+        ]
+
+        self.forcing = [
+            torch.as_tensor(f, dtype=torch.float32, device=device) if len(f) > 0 else f
+            for f in self.forcing
+        ]
+        if self.forcing_cell_idx is not None:
+            self.forcing_cell_idx = self.forcing_cell_idx.to(device, non_blocking=True)
 
         self.device = device
 
