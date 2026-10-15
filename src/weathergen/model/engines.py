@@ -30,7 +30,7 @@ from weathergen.model.embeddings import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.utils import ActivationFactory
-from weathergen.utils.utils import get_dtype
+from weathergen.utils.utils import get_dtype, is_stream_fe_only
 
 
 class EmbeddingEngine(torch.nn.Module):
@@ -49,8 +49,16 @@ class EmbeddingEngine(torch.nn.Module):
         self.sources_size = sources_size  # KCT:iss130, what is this?
         self.embeds = torch.nn.ModuleDict()
         self.streams = cf.streams
+        # condition/forcing streams feed the FE directly and are omitted from
+        # get_sources_size(), so they must be omitted here too or the indices misalign
+        self.data_stream_names = [
+            name for name, cfg in cf.streams.items() if not is_stream_fe_only(cfg)
+        ]
+        self.data_streams = [cfg for cfg in cf.streams.values() if not is_stream_fe_only(cfg)]
 
-        for i, (stream_name, si) in enumerate(self.streams.items()):
+        for i, (si, stream_name) in enumerate(
+            zip(self.data_streams, self.data_stream_names, strict=True)
+        ):
             if si.get("diagnostic", False) or self.sources_size[i] == 0:
                 self.embeds[stream_name] = torch.nn.Identity()
                 continue
@@ -88,7 +96,7 @@ class EmbeddingEngine(torch.nn.Module):
 
         # iterate over all streams
         x_embeds = []
-        for stream_name in self.streams.keys():
+        for stream_name in self.data_stream_names:
             # collect all source tokens from all input_steps and all samples in the batch
             sdata = []
             for istep in range(num_steps_input):
@@ -620,14 +628,15 @@ class ForecastingEngine(torch.nn.Module):
         for block in self.fe_blocks:
             block.apply(init_weights_final)
 
-    def forward(self, tokens, fstep, coords=None):
+    def forward(self, tokens, condition, coords=None):
         if self.training:
             # Impute noise to the latent state
             noise_std = self.cf.get("fe_impute_latent_noise_std", 0.0)
             if noise_std > 0.0:
                 tokens = tokens + torch.randn_like(tokens) * torch.norm(tokens) * noise_std
 
-        aux_info = None
+        # condition stream (and any forcing routed through it) drives the FE AdaLN
+        aux_info = None if condition is None or len(condition) == 0 else condition.to(tokens.dtype)
         for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 tokens = checkpoint(block, tokens, use_reentrant=False)
@@ -864,7 +873,10 @@ class TargetPredictionEngine(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, 9, self.cf.ae_global_dim_embed))
         dim_aux = self.cf.ae_global_dim_embed
 
-        target_readout_num_heads = next(self.cf.streams.values())["target_readout"]["num_heads"]
+        # first real data stream (condition/forcing streams have no target_readout)
+        target_readout_num_heads = next(
+            s for s in self.cf.streams.values() if not is_stream_fe_only(s)
+        )["target_readout"]["num_heads"]
         for ith, dim in enumerate(self.dims_embed[:-1]):
             if self.cf.decoder_type == "PerceiverIO":
                 # a single cross attention layer as per https://arxiv.org/pdf/2107.14795

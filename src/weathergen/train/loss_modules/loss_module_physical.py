@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 import weathergen.train.loss_modules.loss_functions as loss_fns
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.utils import TRAIN, VAL, Stage
+from weathergen.utils.utils import is_stream_fe_only
 
 _logger = logging.getLogger(__name__)
 
@@ -281,7 +282,15 @@ class LossPhysical(LossModuleBase):
         source2target_idxs, output_info, target2source_idxs, target_info = metadata
 
         # TODO: iterate over batch dimension
-        for stream_name, stream_info in self.cf.streams.items():
+        # condition/forcing streams feed the FE directly and produce no physical predictions
+        data_streams = [
+            stream_cfg
+            for stream_cfg in self.cf.streams.values()
+            if not is_stream_fe_only(stream_cfg)
+        ]
+
+        for stream_info in data_streams:
+            stream_name = stream_info["name"]
             # TODO: avoid this
             target_channels = (
                 stream_info.val_target_channels
