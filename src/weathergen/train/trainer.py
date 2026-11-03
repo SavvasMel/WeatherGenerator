@@ -246,7 +246,9 @@ class Trainer(TrainerBase):
         # AMIP free-running rollout instead of the scored-forecast validation path.
         # Gated on a config key so --options rollout_mode=amip reaches it through the
         # existing launch scripts with no CLI change.
-        if str(cf.get("rollout_mode", "")).lower() == "amip":
+        if str(cf.get("rollout_mode", "")).lower() == "amip" or cf.get("rollout", {}).get(
+            "mode"
+        ):
             self.amip_rollout(cf)
         else:
             # inference validation set
@@ -271,7 +273,7 @@ class Trainer(TrainerBase):
         """
         from pathlib import Path
 
-        from weathergen.rollout import AMIPRollout
+        from weathergen.rollout import AMIPRollout, LatentRollout
 
         if not is_root():
             logger.info("amip_rollout: non-root rank idle (rollout is sequential).")
@@ -282,7 +284,14 @@ class Trainer(TrainerBase):
         end = np.datetime64(str(rc.get("end", self.test_cfg.end_date)))
         out = Path(rc.get("output", f"amip_{cf.general.run_id}.zarr"))
 
-        rollout = AMIPRollout(
+        # rollout.mode: physical (default) or latent
+        mode = str(rc.get("mode", "physical")).lower()
+        if mode not in ("physical", "latent"):
+            raise ValueError(
+                f"rollout.mode={mode!r} not recognised; expected 'physical' or 'latent'."
+            )
+
+        kwargs = dict(
             model=self.model,
             model_params=self.model_params,
             sampler=self.dataset,
@@ -290,7 +299,12 @@ class Trainer(TrainerBase):
             feedback_stream=str(rc.get("feedback_stream", "ERA5")),
             device=self.devices[0],
         )
-        logger.info("AMIP rollout %s -> %s, writing %s", start, end, out)
+        if mode == "latent":
+            lc = rc.get("latent", {})
+            rollout = LatentRollout(**kwargs, reencode_every=int(lc.get("reencode_every", 0)))
+        else:
+            rollout = AMIPRollout(**kwargs)
+        logger.info("%s rollout %s -> %s, writing %s", mode, start, end, out)
         rollout.run(
             start,
             end,

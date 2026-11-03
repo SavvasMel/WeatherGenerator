@@ -1,5 +1,12 @@
-"""Multi-year free-running rollout, feeding one stream back on itself (AMIP and alike)."""
+"""Multi-year free-running rollouts (AMIP): physical or latent mode."""
 
 from .amip_rollout import AMIPRollout, ChannelMap, RolloutState
+from .latent_rollout import LatentRollout, LatentRolloutState
 
-__all__ = ["AMIPRollout", "ChannelMap", "RolloutState"]
+__all__ = [
+    "AMIPRollout",
+    "ChannelMap",
+    "RolloutState",
+    "LatentRollout",
+    "LatentRolloutState",
+]

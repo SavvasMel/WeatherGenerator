@@ -24,6 +24,8 @@ import numpy as np
 import torch
 import zarr
 
+from .output_lock import OutputLock
+
 logger = logging.getLogger(__name__)
 
 # Fields exceeding this many standard deviations from their training mean are
@@ -333,14 +335,10 @@ class AMIPRollout:
                 f"from its training mean (threshold {BLOWUP_ZSCORE})."
             )
 
-    @torch.no_grad()
-    def step(self) -> RolloutState:
-        """Advance one outer iteration: refresh forcing, re-encode, predict."""
-        if self.state is None:
-            raise RuntimeError("Rollout not initialized; call initialize() first.")
-
-        t = self.state.timestamp
-        idx = self._index_for(t)
+    def _build_batch(self, idx: int, inject: bool = True):
+        """Assemble the batch at window ``idx``; with ``inject`` serve the carried state."""
+        if not inject:
+            return self.sampler._get_batch(idx, self.num_steps)
 
         # only this stream is overridden; the others read fresh from the dataset
         self.injector.override = self.state.data
@@ -356,23 +354,10 @@ class AMIPRollout:
                 "the wrapped reader. The rollout would have silently re-read truth "
                 "from disk and produced a fake 'perfect' result."
             )
+        return batch
 
-        # Mirror Trainer.train/validate exactly: move the whole ModelBatch, then
-        # hand the model *source samples* (not the ModelBatch), under the same
-        # autocast as training so inference numerics match.
-        batch.to_device(self.device)
-        source_samples = batch.get_source_samples()
-
-        with torch.autocast(
-            device_type="cuda",
-            dtype=self.mixed_precision_dtype,
-            enabled=bool(self.cf.get("with_mixed_precision", False)),
-        ):
-            # Model.forward takes (model_params, batch); how many steps it advances comes
-            # from the batch itself via get_output_idxs(), not from an argument.
-            out = self.model(self.model_params, source_samples)
-
-        last = max(source_samples.get_output_idxs())
+    def _decode_to_physical(self, out, batch, last: int) -> np.ndarray:
+        """Turn a ModelOutput into the fed-back stream's physical state, SOURCE order."""
         pred = out.get_physical_prediction(last, self.feedback_stream)
         if isinstance(pred, (list, tuple)):
             pred = pred[0]
@@ -396,7 +381,36 @@ class AMIPRollout:
             pred = pred[0]
 
         physical = self.reader.denormalize_target_channels(pred)
-        next_data = self.channel_map.target_to_source(physical)
+        return self.channel_map.target_to_source(physical)
+
+    @property
+    def _autocast(self):
+        """The same autocast training used, so inference numerics match."""
+        return torch.autocast(
+            device_type="cuda",
+            dtype=self.mixed_precision_dtype,
+            enabled=bool(self.cf.get("with_mixed_precision", False)),
+        )
+
+    @torch.no_grad()
+    def step(self) -> RolloutState:
+        """Advance one outer iteration: refresh forcing, re-encode, predict."""
+        if self.state is None:
+            raise RuntimeError("Rollout not initialized; call initialize() first.")
+
+        t = self.state.timestamp
+        idx = self._index_for(t)
+        batch = self._build_batch(idx, inject=True)
+
+        # same device move and autocast as training
+        batch.to_device(self.device)
+        source_samples = batch.get_source_samples()
+
+        with self._autocast:
+            out = self.model(self.model_params, source_samples)
+
+        last = max(source_samples.get_output_idxs())
+        next_data = self._decode_to_physical(out, batch, last)
 
         t_next = t + np.timedelta64(self.hours_per_iter, "h")
 
@@ -431,6 +445,12 @@ class AMIPRollout:
         logger.info("Initialized at %s, state shape %s", start, self.state.data.shape)
         return self.state
 
+    def _after_resume(self, output_path, n_done: int, last_time, store) -> None:
+        """Hook: a subclass carrying state the zarr does not hold restores it here."""
+
+    def _on_checkpoint(self, output_path, store) -> None:
+        """Hook: a subclass carrying state the zarr does not hold checkpoints it here."""
+
     def run(
         self,
         start: np.datetime64 | str,
@@ -448,6 +468,9 @@ class AMIPRollout:
         start = np.datetime64(start) if isinstance(start, str) else start
         end = np.datetime64(end) if isinstance(end, str) else end
         output_path = Path(output_path)
+
+        # one writer per output store
+        lock = OutputLock(output_path, run_id=str(self.cf.general.get("run_id", ""))).acquire()
 
         # Each iteration starting at t needs targets out to t + hours_per_iter, so
         # the last usable start is t_end - hours_per_iter. Going beyond makes the
@@ -510,6 +533,7 @@ class AMIPRollout:
                     "RESUMING rollout from step %d at %s (appending to %s)",
                     n_done, last_time, output_path,
                 )
+                self._after_resume(output_path, n_done, last_time, store)
                 resumed = True
             else:
                 logger.warning("resume requested but no steps in %s; starting fresh", output_path)
@@ -546,6 +570,9 @@ class AMIPRollout:
                 if s.step % checkpoint_every == 0:
                     store.attrs["last_completed_step"] = s.step
                     store.attrs["last_completed_time"] = str(s.timestamp)
+                    self._on_checkpoint(output_path, store)
+                    # re-stamp so a long run is never mistaken for a dead one
+                    lock.refresh()
                     logger.info("step %d/%d  t=%s", s.step, n_expected, s.timestamp)
         except FloatingPointError as e:
             # Record where it died rather than losing the diagnosis with the process.
@@ -555,6 +582,8 @@ class AMIPRollout:
             store.attrs["diverged_reason"] = str(e)
             logger.error("Rollout diverged and was stopped: %s", e)
             raise
+        finally:
+            lock.release()
 
         store.attrs["completed"] = True
         logger.info("Rollout complete: %d steps -> %s", self.state.step, output_path)
