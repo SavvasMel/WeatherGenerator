@@ -13,7 +13,7 @@ import pytest
 from omegaconf import OmegaConf
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-STREAMS = CONFIG_DIR / "streams" / "era5_1deg_latent"
+STREAMS = CONFIG_DIR / "streams" / "era5_1deg_injection"
 
 # what model.py requires before it will build an injection module
 INJECTED = {"ERA5_FORCING": ["sst", "ci", "sst_anom"], "ERA5_ANCHOR": ["2t_clim"]}
@@ -27,8 +27,8 @@ def _streams() -> dict:
 
 
 def test_latent_config_parses():
-    cfg = OmegaConf.load(CONFIG_DIR / "config_latent.yml")
-    assert cfg.streams_directory == "./config/streams/era5_1deg_latent/"
+    cfg = OmegaConf.load(CONFIG_DIR / "config_injection.yml")
+    assert cfg.streams_directory == "./config/streams/era5_1deg_injection/"
     assert cfg.rollout.mode == "latent"
     assert cfg.rollout.latent.reencode_every == 0
 
@@ -81,7 +81,7 @@ def test_tendency_channels_are_excluded():
 
 def test_no_pushforward_at_eight_steps():
     """Pushforward at num_steps 8 is what collapsed sub-monthly variability to ~40%."""
-    fc = OmegaConf.load(CONFIG_DIR / "config_latent.yml").training_config.forecast
+    fc = OmegaConf.load(CONFIG_DIR / "config_injection.yml").training_config.forecast
     assert fc.num_steps == 8
     assert fc.pushforward is False
     assert fc.timestep_weight.gamma_decay.decay_factor < 1.0

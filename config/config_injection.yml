@@ -82,7 +82,7 @@ load_chkpt: {}
 
 norm_type: "LayerNorm"
 
-streams_directory: "./config/streams/era5_1deg_latent/"
+streams_directory: "./config/streams/era5_1deg_injection/"
 streams: ???
 
 zarr_store: zip
