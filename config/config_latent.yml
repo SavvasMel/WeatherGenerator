@@ -3,7 +3,7 @@
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 #
-# Daily-mean AIMIP configuration for the latent rollout, trained from scratch: forcings and
+# Daily-mean AIMIP configuration, trained from scratch: forcings and
 # anchor injected into the forecasting engine, num_steps 8 without pushforward,
 # decaying weights across forecast leads.
 
@@ -92,7 +92,7 @@ general:
   rank: ???
   world_size: ???
   multiprocessing_method: "fork"
-  desc: "AIMIP weather generator, latent rollout: FE-injected SST + trend-climatology anchor"
+  desc: "AIMIP weather generator: forcing-injected SST and SSTREG 2 m anchor (physical or latent rollout)"
   run_id: ???
   run_history: []
 
