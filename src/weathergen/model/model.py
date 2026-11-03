@@ -389,10 +389,9 @@ class Model(torch.nn.Module):
         else:
             self.forecast_engine = IdentityEngine()
 
-        # per-step boundary forcing injected into the forecasting engine; None unless a
-        # stream asks for it. Only one forcing stream is supported.
-        self.forcing_module = None
-        for stream_cfg in cf.streams.values():
+        # one injection module (and gate) per `type: forcing` stream
+        self.forcing_modules = torch.nn.ModuleDict()
+        for stream_name, stream_cfg in cf.streams.items():
             if stream_cfg.get("type") != "forcing":
                 continue
             mode = stream_cfg.get("injection", {}).get("mode", "none")
@@ -402,10 +401,12 @@ class Model(torch.nn.Module):
                 "val_source_channels", []
             )
             # dim_embed matches the FE token dim so the injection is a plain sum
-            self.forcing_module = ForcingInjection(
-                num_vars=len(channels), dim_embed=cf.ae_global_dim_embed, mode=mode
+            self.forcing_modules[stream_name] = ForcingInjection(
+                num_vars=len(channels),
+                dim_embed=cf.ae_global_dim_embed,
+                mode=mode,
+                gate_init=float(stream_cfg.get("injection", {}).get("gate_init", 0.0)),
             )
-            break
 
         # embed coordinates yielding one query token for each target token
         dropout_rate = cf.embed_dropout_rate
@@ -613,6 +614,10 @@ class Model(torch.nn.Module):
 
         self.apply(_reset_params)
 
+        # gates are bare Parameters, not reset by _reset_params (meta-device init)
+        for module in self.forcing_modules.values():
+            module.reset_parameters()
+
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
 
@@ -705,6 +710,17 @@ class Model(torch.nn.Module):
         """
 
         output = ModelOutput(batch.get_output_len())
+        tokens, output = self.encode_to_latent(model_params, batch, output)
+        _tokens, output = self.advance_latent(model_params, batch, tokens, output)
+
+        return output
+
+    def encode_to_latent(
+        self, model_params: ModelParams, batch: ModelBatch, output: ModelOutput | None = None
+    ) -> tuple[torch.Tensor, ModelOutput]:
+        """Embed and assimilate the sources into the global latent state."""
+        if output is None:
+            output = ModelOutput(batch.get_output_len())
 
         tokens, posteriors = self.encoder(model_params, batch)
         output.add_latent_prediction(0, "posteriors", posteriors)
@@ -714,18 +730,27 @@ class Model(torch.nn.Module):
         # collapse along input step dimension
         tokens = tokens.reshape(shape).sum(axis=1)
 
+        return tokens, output
+
+    def advance_latent(
+        self,
+        model_params: ModelParams,
+        batch: ModelBatch,
+        tokens: torch.Tensor,
+        output: ModelOutput | None = None,
+        decode: bool = True,
+    ) -> tuple[torch.Tensor, ModelOutput]:
+        """Advance the latent over the output steps; returns (tokens, output)."""
+        if output is None:
+            output = ModelOutput(batch.get_output_len())
+
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
         # roll-out in latent space, iterate and generate output over requested output steps
         for step in batch.get_output_idxs():
             without_grad = p_fwd and self.training and step != max(batch.get_output_idxs())
-            # Re-apply the prescribed boundary condition before advancing. Must not be
-            # skipped on some ranks only: the embedding is sharded and the all-gathers
-            # would desynchronise.
-            if self.forcing_module is not None:
-                forcing = getattr(batch, "forcing", None)
-                field = forcing[step] if forcing is not None and step < len(forcing) else None
-                tokens, _ = self.forcing_module(tokens, None, field, self.num_aux_tokens)
+            # inject forcings before each step (same path on all ranks)
+            tokens = self._inject_forcings(tokens, batch, step)
             if without_grad:
                 # Pushforward mode: advance tokens without grad; no decoding
                 with torch.no_grad():
@@ -733,12 +758,25 @@ class Model(torch.nn.Module):
                 continue
 
             tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
+            if not decode:
+                continue
             # decoder predictions
             output = self.predict_decoders(model_params, step, tokens, batch, output)
             # latent predictions (raw and with SSL heads)
             output = self.predict_latent(model_params, step, tokens, batch, output)
 
-        return output
+        return tokens, output
+
+    def _inject_forcings(self, tokens: torch.Tensor, batch, step: int) -> torch.Tensor:
+        """Add every configured forcing to the latent state for this step."""
+        if not self.forcing_modules:
+            return tokens
+        forcing = getattr(batch, "forcing", None)
+        step_fields = forcing[step] if forcing is not None and step < len(forcing) else None
+        for stream_name, module in self.forcing_modules.items():
+            field = step_fields.get(stream_name) if isinstance(step_fields, dict) else None
+            tokens, _ = module(tokens, None, field, self.num_aux_tokens)
+        return tokens
 
     def predict_latent(
         self,

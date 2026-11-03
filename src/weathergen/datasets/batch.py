@@ -292,8 +292,7 @@ class ModelBatch:
     source2target_matching_idxs: np.typing.NDArray[np.int32]
     target2source_matching_idxs: np.typing.NDArray[np.int32]
 
-    # per-step forcing field on the latent cells, (num_cells, 2*num_vars) =
-    # [cell values | validity fraction]; empty for steps with no forcing stream
+    # per output step: {forcing stream: (num_cells, 2*num_vars) = [values | validity]}
     forcing: list
 
     # indices of valid outputs
@@ -324,7 +323,7 @@ class ModelBatch:
             stream_names, num_target_samples, output_steps, self.output_idxs
         )
 
-        self.forcing = [[] for _ in range(output_steps)]
+        self.forcing = [{} for _ in range(output_steps)]
 
         self.source2target_matching_idxs = np.full(num_source_samples, -1, dtype=np.int32)
         self.target2source_matching_idxs = [[] for _ in range(num_target_samples)]
@@ -348,7 +347,11 @@ class ModelBatch:
         self.source_samples.to_device(device)
         self.target_samples.to_device(device)
         self.forcing = [
-            f.to(device) if torch.is_tensor(f) and f.numel() > 0 else f for f in self.forcing
+            {
+                name: f.to(device) if torch.is_tensor(f) and f.numel() > 0 else f
+                for name, f in step_fields.items()
+            }
+            for step_fields in self.forcing
         ]
 
         self.device = device

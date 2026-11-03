@@ -2,20 +2,7 @@
 #
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
-"""Per-step injection of a prescribed boundary forcing into the forecasting engine.
-
-The channels of a stream declared ``type: forcing`` are binned onto the latent HEALPix
-cells, embedded, and added to the latent state before each advance, so the boundary
-condition is re-applied at every step rather than only at initialisation. Prescribed SST
-and sea ice are the AMIP case; nothing here is specific to them.
-
-Missing data is explicit: a forcing may be undefined over part of the domain, so each cell
-carries both a value and the fraction of contributing points that were valid. The network
-sees the mask, rather than a zero it cannot distinguish from a genuine value.
-
-The injection gate is zero-initialised, so a model fine-tuned from a checkpoint without
-forcing starts from an unchanged function.
-"""
+"""Per-step injection of prescribed forcings (e.g. SST, an anchor) into the forecasting engine."""
 
 import numpy as np
 import torch
@@ -27,11 +14,7 @@ from weathergen.datasets.utils import coords_to_hpyidxs
 def build_forcing_cell_index(
     latitudes: np.ndarray, longitudes: np.ndarray, healpix_level: int
 ) -> torch.Tensor:
-    """Map each forcing grid point to its latent HEALPix cell.
-
-    Uses the tokenizer's nested convention so the binned cells align one-to-one with the
-    forecasting-engine token cells. The forcing grid is fixed, so this is computed once.
-    """
+    """Map each forcing grid point to its latent HEALPix cell."""
     idx = coords_to_hpyidxs(healpix_level, np.asarray(latitudes), np.asarray(longitudes))
     return torch.as_tensor(np.asarray(idx), dtype=torch.long)
 
@@ -39,11 +22,7 @@ def build_forcing_cell_index(
 def scatter_to_cells(
     values: torch.Tensor, cell_idx: torch.Tensor, num_cells: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Average forcing points onto their cells, ignoring NaNs.
-
-    Returns per-cell means and, alongside them, the fraction of that cell's points which
-    carried data - 0 for an all-land cell.
-    """
+    """Average forcing points onto cells, ignoring NaNs; also return the valid fraction per cell."""
     *lead, num_points, num_vars = values.shape
     flat = values.reshape(-1, num_points, num_vars)
     n_batch = flat.shape[0]
@@ -85,9 +64,7 @@ class ForcingEmbed(nn.Module):
         )
 
     def reset_parameters(self) -> None:
-        """Re-initialise after ``to_empty()`` when this module is absent from a loaded
-        checkpoint (see ``model_interface.py::load_model``). ``mean``/``stdev`` are identity
-        defaults rather than data statistics, so set them directly."""
+        """Reset to identity normalisation and fresh MLP weights."""
         with torch.no_grad():
             self.mean.zero_()
             self.stdev.fill_(1.0)
@@ -110,26 +87,26 @@ class ForcingInjection(nn.Module):
     SUPPORTED = ("none", "additive")
 
     def __init__(self, num_vars: int, dim_embed: int, mode: str = "additive",
-                 dim_aux: int = 0, num_heads: int = 8) -> None:
+                 dim_aux: int = 0, num_heads: int = 8, gate_init: float = 0.0) -> None:
         super().__init__()
         if mode not in self.SUPPORTED:
             raise ValueError(
                 f"forcing injection mode {mode!r} not supported; expected {self.SUPPORTED}"
             )
         self.mode, self.num_vars, self.dim_embed = mode, num_vars, dim_embed
+        self.gate_init = float(gate_init)
         if mode == "none":
             return
         self.embed = ForcingEmbed(num_vars, dim_embed)
-        self.gate = nn.Parameter(torch.zeros(1))
+        # gate_init 0: no-op on warm start; use 1.0 when training from scratch
+        self.gate = nn.Parameter(torch.full((1,), self.gate_init))
 
     def reset_parameters(self) -> None:
-        """Re-initialise after ``to_empty()`` when this module is absent from a loaded
-        checkpoint, as on a warm start from an encode-once run. Mirrors ``__init__``: zero the
-        gate so injection starts as an exact no-op, then reset the embedding."""
+        """Reset the gate to ``gate_init`` and the embedding."""
         if self.mode == "none":
             return
         with torch.no_grad():
-            self.gate.zero_()
+            self.gate.fill_(self.gate_init)
         self.embed.reset_parameters()
 
     @staticmethod

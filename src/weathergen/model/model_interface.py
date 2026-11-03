@@ -11,6 +11,7 @@
 
 import itertools
 import logging
+import re
 
 import torch
 from torch.distributed.fsdp import (
@@ -165,6 +166,7 @@ def init_model_and_shard(
             model.to_empty(device="cuda")
             if with_fsdp:
                 model.reset_parameters()
+                _assert_forcing_gates_initialised(model)
 
     # model params
     model_params = ModelParams(cf).create(cf)
@@ -172,6 +174,65 @@ def init_model_and_shard(
     model_params = model_params.to(f"cuda:{cf.local_rank}")
 
     return model, model_params
+
+
+def _migrate_legacy_forcing_keys(params: dict, model, filename: str = "") -> dict:
+    """Rename legacy ``forcing_module.*`` keys to ``forcing_modules.<stream>.*``."""
+    legacy = [k for k in params if re.search(r"(^|\.)forcing_module\.", k)]
+    if not legacy:
+        return params
+
+    core = getattr(model, "module", model)  # DDP wraps the top level
+    names = list(getattr(core, "forcing_modules", None) or [])
+    if not names:
+        # no injection configured; the keys stay unused, as they did before
+        return params
+    if len(names) > 1:
+        raise RuntimeError(
+            f"Checkpoint {filename} stores forcing weights under the legacy single-module "
+            f"name, but this configuration has {len(names)} forcing streams ({names}). "
+            "Which one the checkpoint's weights belong to cannot be inferred, and guessing "
+            "would load a trained forcing onto the wrong stream. Warm-start from a "
+            "single-forcing configuration first, or start these modules from scratch."
+        )
+
+    target = names[0]
+    migrated = {
+        re.sub(r"(^|\.)forcing_module\.", rf"\1forcing_modules.{target}.", k): v
+        for k, v in params.items()
+    }
+    logger.info(
+        "Checkpoint %s predates per-stream forcing injection; mapped %d legacy "
+        "forcing_module.* key(s) onto forcing_modules.%s.*",
+        filename, len(legacy), target,
+    )
+    return migrated
+
+
+def _assert_forcing_gates_initialised(model) -> None:
+    """Raise if a forcing gate differs from its configured ``gate_init``."""
+    core = getattr(model, "module", model)
+    modules = getattr(core, "forcing_modules", None)
+    if not modules:
+        return
+    wrong = []
+    for name, module in modules.items():
+        want = float(getattr(module, "gate_init", 0.0))
+        got = float(module.gate.detach().float().reshape(-1)[0])
+        if abs(got - want) > 1e-6:
+            wrong.append(f"{name}: gate={got:.3e}, configured gate_init={want}")
+    if wrong:
+        raise RuntimeError(
+            "Forcing injection gates were not initialised to their configured values:\n  "
+            + "\n  ".join(wrong)
+            + "\nThe prescribed forcing would contribute nothing and the run would look "
+            "entirely healthy. This is the meta-device materialisation path used by "
+            "from-scratch FSDP training; see Model.reset_parameters."
+        )
+    logger.info(
+        "forcing injection gates initialised: %s",
+        {n: round(float(m.gate.detach().float().reshape(-1)[0]), 6) for n, m in modules.items()},
+    )
 
 
 def load_model(cf, model, device, run_id: str, mini_epoch=-1):
@@ -190,6 +251,7 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
     params = torch.load(
         path_run / filename, map_location=torch.device("cpu"), mmap=True, weights_only=True
     )
+    params = _migrate_legacy_forcing_keys(params, model, filename)
 
     is_model_sharded = cf.with_ddp and cf.with_fsdp
     if is_model_sharded:

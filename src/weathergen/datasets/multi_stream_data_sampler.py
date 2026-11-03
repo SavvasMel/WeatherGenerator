@@ -676,7 +676,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         if not hasattr(self, "_forcing_rng"):
             self._forcing_rng = np.random.default_rng(0)
         num_cells = 12 * 4**self.healpix_level
-        for stream in self.forcing_datasets.values():
+        for stream_name, stream in self.forcing_datasets.items():
             num_vars = len(stream.readers[0].source_channels)
             for timestep_idx in range(self.output_offset, num_output_steps):
                 step_idx = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
@@ -690,7 +690,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     # Must still emit a field: the injection runs collectives over sharded
                     # parameters, so every rank has to take the same path. Skipping here
                     # makes ranks diverge and NCCL hangs on mismatched all-gathers.
-                    batch.forcing[timestep_idx] = torch.zeros(
+                    batch.forcing[timestep_idx][stream_name] = torch.zeros(
                         num_cells, 2 * num_vars, dtype=torch.float32
                     )
                     continue
@@ -704,7 +704,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     coords[:, 0], coords[:, 1], self.healpix_level
                 )
                 cell_values, cell_valid = scatter_to_cells(values, cell_idx, num_cells)
-                batch.forcing[timestep_idx] = torch.cat([cell_values, cell_valid], dim=-1)
+                batch.forcing[timestep_idx][stream_name] = torch.cat(
+                    [cell_values, cell_valid], dim=-1
+                )
 
     def _get_batch(self, idx: int, num_forecast_steps: int):
         """
