@@ -1,0 +1,12 @@
+# AMIP rollout (1979-2024) with SST and the 2 m anchor warmed by +2 K (sst_anom kept at control).
+# Use with: inference --from-run-id <run_id> --config config/rollout_injection_p2k.yml
+#           --options rollout.output=<path>/p2k.zarr
+streams_directory: "./config/streams/era5_1deg_injection_p2k/"
+rollout_mode: amip
+test_config: {start_date: '1979-01-01T00:00', end_date: '2024-12-31T00:00'}
+rollout:
+  mode: physical
+  num_steps: 3
+  resume: False
+  output: ???
+data_loading: {rng_seed: 1234}

@@ -85,3 +85,25 @@ def test_no_pushforward_at_eight_steps():
     assert fc.num_steps == 8
     assert fc.pushforward is False
     assert fc.timestep_weight.gamma_decay.decay_factor < 1.0
+
+
+@pytest.mark.parametrize("pert", ["p2k", "p4k"])
+def test_perturbed_streams_differ_only_in_file_names(pert):
+    """The warming streams must equal the control streams except for the -<pert> data files."""
+    for f in sorted(STREAMS.glob("*.yml")):
+        ctrl = f.read_text()
+        warm = (STREAMS.parent / f"era5_1deg_injection_{pert}" / f.name).read_text()
+        for name in ("ERA5-o96-ANCHOR-SSTREG-1979-2024-fit1979-2014",
+                     "ERA5-o96-FORCING-sst-ci-anom-tend-1979-2024"):
+            ctrl = ctrl.replace(name, f"{name}-{pert}")
+        assert warm == ctrl, f"{pert}/{f.name} differs from the control beyond the file names"
+
+
+@pytest.mark.parametrize("suffix", ["", "_p2k", "_p4k"])
+def test_rollout_overlays(suffix):
+    cfg = OmegaConf.load(CONFIG_DIR / f"rollout_injection{suffix}.yml")
+    assert cfg.streams_directory == f"./config/streams/era5_1deg_injection{suffix}/"
+    assert (CONFIG_DIR.parent / cfg.streams_directory).is_dir()
+    assert cfg.rollout.mode == "physical" and cfg.rollout.num_steps == 3
+    # no default output: two experiments must never write to the same store
+    assert OmegaConf.is_missing(cfg.rollout, "output")

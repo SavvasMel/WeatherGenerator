@@ -1,0 +1,12 @@
+# Control AMIP rollout (1979-2024) of a model trained with config_injection.yml.
+# Use with: inference --from-run-id <run_id> --config config/rollout_injection.yml
+#           --options rollout.output=<path>/ctrl.zarr
+streams_directory: "./config/streams/era5_1deg_injection/"
+rollout_mode: amip
+test_config: {start_date: '1979-01-01T00:00', end_date: '2024-12-31T00:00'}
+rollout:
+  mode: physical
+  num_steps: 3
+  resume: False
+  output: ???
+data_loading: {rng_seed: 1234}

@@ -1,0 +1,48 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Prescribed ocean forcing, injected into the forecasting engine at every forecast step.
+# sst and ci are undefined over land; the injection carries a per-cell validity fraction.
+ERA5_FORCING :
+  # type: forcing = injected, not assimilated through the encoder
+  type : forcing
+  forcing : True
+  stream_id : 1
+  injection :
+    mode : additive
+    # 1.0 when training from scratch (0.0 = no-op on warm start)
+    gate_init : 1.0
+  filenames : ['ERA5-o96-FORCING-sst-ci-anom-tend-1979-2024-p2k.zarr']
+  source : ['sst', 'ci', 'sst_anom']
+  target : []
+  target_exclude : ['sst', 'ci', 'sst_anom']
+  target_channel_weights : []
+  loss_weight : 0.0
+  location_weight : cosine_latitude
+  masking_rate : 0.0
+  masking_rate_none : 0.0
+  token_size : 8
+  tokenize_spacetime : True
+  frequency : 24h
+  embed :
+    net : transformer
+    num_tokens : 1
+    num_heads : 8
+    dim_embed : 256
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 256
+  target_readout :
+    type : obs_value
+    num_layers : 2
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1

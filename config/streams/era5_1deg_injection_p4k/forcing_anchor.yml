@@ -1,0 +1,48 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# 2 m temperature anchor, injected into the forecasting engine at every forecast step,
+# with its own gate (separate from the ocean forcing).
+ERA5_ANCHOR :
+  # type: forcing = injected, not assimilated through the encoder
+  type : forcing
+  forcing : True
+  stream_id : 2
+  injection :
+    mode : additive
+    # 0.0: the model adopts the anchor only if it helps
+    gate_init : 0.0
+  filenames : ['ERA5-o96-ANCHOR-SSTREG-1979-2024-fit1979-2014-p4k.zarr']
+  source : ['2t_clim']
+  target : []
+  target_exclude : ['2t_clim']
+  target_channel_weights : []
+  loss_weight : 0.0
+  location_weight : cosine_latitude
+  masking_rate : 0.0
+  masking_rate_none : 0.0
+  token_size : 8
+  tokenize_spacetime : True
+  frequency : 24h
+  embed :
+    net : transformer
+    num_tokens : 1
+    num_heads : 8
+    dim_embed : 256
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 256
+  target_readout :
+    type : obs_value
+    num_layers : 2
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1
