@@ -1,9 +1,9 @@
-"""The shipped latent configuration must actually reach the forecasting engine.
+"""The shipped injection configuration must actually reach the forecasting engine.
 
 `type: anemoi` + `forcing: True` and `type: forcing` both describe a prescribed boundary
 condition, but only the second is routed to ForcingInjection. A config using the first
 still parses, still trains and still produces plausible output - while building no
-injection module at all, which in a latent rollout means the boundary condition is frozen
+injection module at all, which in a rollout means the boundary condition is frozen
 at initialisation for the entire run. Nothing downstream reports it.
 """
 
@@ -26,10 +26,10 @@ def _streams() -> dict:
     return merged
 
 
-def test_latent_config_parses():
+def test_injection_config_parses():
     cfg = OmegaConf.load(CONFIG_DIR / "config_injection.yml")
     assert cfg.streams_directory == "./config/streams/era5_1deg_injection/"
-    assert cfg.rollout.mode == "latent"
+    assert cfg.rollout.mode == "physical"
     assert cfg.rollout.latent.reencode_every == 0
 
 

@@ -92,7 +92,7 @@ general:
   rank: ???
   world_size: ???
   multiprocessing_method: "fork"
-  desc: "AIMIP weather generator: forcing-injected SST and SSTREG 2 m anchor (physical or latent rollout)"
+  desc: "AIMIP weather generator: forcing-injected SST and SSTREG 2 m anchor"
   run_id: ???
   run_history: []
 
@@ -181,13 +181,13 @@ wgtags:
 
 # Rollout settings (read only by the rollout entry point)
 rollout:
-  # physical: re-encode decoded fields each iteration; latent: carry the latent
-  mode: latent
+  # physical: re-encode decoded fields each iteration (default); latent: carry the latent
+  mode: physical
   feedback_stream: ERA5
   # forecast steps per outer iteration (at most forecast.num_steps)
   num_steps: 1
   checkpoint_every: 200
   resume: False
   latent:
-    # 0 = never re-encode (pure latent), 1 = physical rollout, N = re-encode every N
+    # used only with mode: latent. 0 = pure latent, N = re-encode every N iterations
     reencode_every: 0
