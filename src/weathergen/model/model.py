@@ -416,8 +416,6 @@ class Model(torch.nn.Module):
             name for name, cfg in cf.streams.items() if not is_stream_fe_only(cfg)
         ]
         self.data_streams = [cfg for cfg in cf.streams.values() if not is_stream_fe_only(cfg)]
-
-        # per-step spatial forcing injected into the FE (SST etc.); stays None if no such stream
         for stream_cfg in cf.streams.values():
             if stream_cfg.get("type") != "forcing":
                 continue
