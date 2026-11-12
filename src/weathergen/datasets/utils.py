@@ -11,6 +11,7 @@
 import astropy_healpix as hp
 import numpy as np
 import torch
+from astropy_healpix.healpy import ang2pix
 
 from weathergen.datasets.batch import BatchSamples
 
@@ -169,6 +170,15 @@ def locs_to_cell_coords_ctrs(
     local_locs = torch.bmm(rotations_selected, all_points.unsqueeze(-1)).squeeze(-1)
 
     return local_locs
+
+
+####################################################################################################
+def coords_to_hpyidxs(hl, thetas, phis):
+    thetas = ((90.0 - thetas) / 180.0) * np.pi
+    phis = ((180.0 + phis) / 360.0) * 2.0 * np.pi
+    hpyidxs = ang2pix(2**hl, thetas, phis, nest=True)
+
+    return hpyidxs
 
 
 def get_tokens_lens(
