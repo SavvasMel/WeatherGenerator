@@ -371,6 +371,24 @@ class DataReaderBase(metaclass=ABCMeta):
 
         return self.length()
 
+    def get_condition(self, idx: TIndex) -> ReaderData:
+        """
+        Get condition data for idx.
+
+        Only condition readers define `condition_idx`.
+
+        Parameters
+        ----------
+        idx : int
+            Index of temporal window
+
+        Returns
+        -------
+        condition data
+        """
+
+        return self._get(idx, self.condition_idx)
+
     def get_source(self, idx: TIndex) -> ReaderData:
         """
         Get source data for idx
