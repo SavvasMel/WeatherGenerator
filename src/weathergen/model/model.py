@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
-from weathergen.datasets.batch import ModelBatch
+from weathergen.datasets.batch import BatchSamples, ModelBatch
 from weathergen.datasets.utils import healpix_verts_rots, r3tos2
 from weathergen.model.encoder import EncoderModule
 from weathergen.model.engines import (
@@ -727,7 +727,7 @@ class Model(torch.nn.Module):
             z_pre_norm=tokens,
         )
 
-    def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
+    def forward(self, model_params: ModelParams, batch: BatchSamples) -> ModelOutput:
         """Forward pass of the model
 
         Tokens are processed through the model components, which were defined in the create method.
@@ -750,35 +750,44 @@ class Model(torch.nn.Module):
 
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
+        # conditions/forcing are filled by the sampler on the source samples, which callers
+        # pass in as `batch`
+        batch_ctx = batch
         # roll-out in latent space, iterate and generate output over requested output steps
         # the first FE step leaves the encoder regime, so it is excluded from the cosine band
         fe_steps = 0
-        # conditions/forcing are filled by the sampler on the source samples, not on the batch
-        source_samples = batch.get_source_samples()
-        conditions = source_samples.conditions
-        forcing = source_samples.forcing
         for step in batch.get_output_idxs():
             without_grad = p_fwd and self.training and step != max(batch.get_output_idxs())
 
             # FE conditioning for this step: the condition stream's encoded values, indexed
             # by absolute forecast step (conditions[] is built for every step from 0).
+            conditions = batch_ctx.conditions
             condition = conditions[step] if step < len(conditions) else None
-            # inject the per-step spatial forcing (e.g. SST) into the latent state /
-            # conditioning before advancing; no-op when no forcing module or no field.
+            # inject the per-step spatial forcing (e.g. SST) into the FE latent state /
+            # conditioning before advancing; no-op when no forcing module or field.
             if self.forcing_module is not None:
+                forcing_list = getattr(batch_ctx, "forcing", None)
+                forcing_field = (
+                    forcing_list[step]
+                    if forcing_list is not None and step < len(forcing_list)
+                    else None
+                )
+                # only used by learned_pool (raw forcing_field, pooled here on GPU);
+                # None/unused for the default fixed-mean (already-scattered) path.
+                forcing_cell_idx = getattr(batch_ctx, "forcing_cell_idx", None)
                 tokens, condition = self.forcing_module(
                     tokens,
                     condition,
-                    forcing[step] if step < len(forcing) else None,
+                    forcing_field,
                     self.num_aux_tokens,
-                    # only used by learned_pool (raw field pooled on GPU); unused otherwise
-                    cell_idx=source_samples.forcing_cell_idx,
+                    cell_idx=forcing_cell_idx,
                     num_cells=self.num_healpix_cells,
                 )
 
             if without_grad:
-                # Pushforward mode: advance tokens without grad; no decoding with torch.no_grad():
-                tokens = self.forecast_engine(tokens, condition, model_params.rope_coords)
+                # Pushforward mode: advance tokens without grad; no decoding
+                with torch.no_grad():
+                    tokens = self.forecast_engine(tokens, condition, model_params.rope_coords)
                 fe_steps += 1
                 continue
 
