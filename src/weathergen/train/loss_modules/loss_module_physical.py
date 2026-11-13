@@ -20,7 +20,7 @@ from omegaconf import DictConfig
 import weathergen.train.loss_modules.loss_functions as loss_fns
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.utils import TRAIN, VAL, Stage
-from weathergen.utils.utils import is_stream_fe_only
+from weathergen.utils.utils import is_stream_fe_only, is_stream_forcing
 
 _logger = logging.getLogger(__name__)
 
@@ -45,6 +45,11 @@ class DynamicLossEMA:
             self.L = cfg.get("L", 20.0)
             self.channel_weights_ema = {}
             for stream_name, stream_info in streams_cfg.items():
+                # condition/forcing streams feed the forecast engine directly and never get
+                # target channels registered by the sampler, so train_target_channels is absent
+                # on them; they produce no physical predictions to weight either way
+                if is_stream_fe_only(stream_info) or is_stream_forcing(stream_info, TRAIN):
+                    continue
                 num_channels = len(stream_info.train_target_channels)
                 self.channel_weights_ema[stream_name] = torch.ones(num_channels, device=device)
 
@@ -53,6 +58,14 @@ class DynamicLossEMA:
     ) -> torch.Tensor | None:
         if not self.enabled:
             return None
+
+        # untracked (forcing) stream: behave as if dynamic loss were off
+        if stream_name not in self.channel_weights_ema:
+            return (
+                weights_channels_static
+                if weights_channels_static is None or weights_channels_static.numel() > 0
+                else None
+            )
 
         ema = self.channel_weights_ema[stream_name]
         if ema.numel() > 0:
@@ -70,7 +83,7 @@ class DynamicLossEMA:
         return weights_channels
 
     def update(self, stream_name: str, loss_lfct_chs: torch.Tensor):
-        if not self.enabled:
+        if not self.enabled or stream_name not in self.channel_weights_ema:
             return
 
         with torch.no_grad():
